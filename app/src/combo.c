@@ -52,6 +52,8 @@ struct combo_cfg {
     int32_t timeout_ms;
     uint32_t layer_mask;
     struct zmk_behavior_binding behavior;
+    struct zmk_behavior_binding quick_behavior;
+
     // if slow release is set, the combo releases when the last key is released.
     // otherwise, the combo releases when the first key is released.
     bool slow_release;
@@ -83,6 +85,7 @@ struct active_combo {
                         .key_positions = DT_PROP(n, key_positions),                                \
                         .key_position_len = DT_PROP_LEN(n, key_positions),                         \
                         .behavior = ZMK_KEYMAP_EXTRACT_BINDING(0, n),                              \
+                        .quick_behavior = ZMK_KEYMAP_EXTRACT_BINDING(1, n),                        \
                         .slow_release = DT_PROP(n, slow_release),                                  \
                         .layer_mask = NODE_PROP_BITMASK(n, layers),                                \
                     }, ),                                                                          \
@@ -289,7 +292,7 @@ static inline int press_combo_behavior(int combo_idx, const struct combo_cfg *co
     };
 
     last_combo_timestamp = timestamp;
-
+    zmk_behavior_invoke_binding(&combo->quick_behavior, event, true);
     return zmk_behavior_invoke_binding(&combo->behavior, event, true);
 }
 
@@ -304,6 +307,19 @@ static inline int release_combo_behavior(int combo_idx, const struct combo_cfg *
     };
 
     return zmk_behavior_invoke_binding(&combo->behavior, event, false);
+}
+
+static inline int quick_release_combo_behavior(int combo_idx, const struct combo_cfg *combo,
+                                               int32_t timestamp) {
+    struct zmk_behavior_binding_event event = {
+        .position = ZMK_VIRTUAL_KEY_POSITION_COMBO(combo_idx),
+        .timestamp = timestamp,
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+        .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
+#endif
+    };
+
+    return zmk_behavior_invoke_binding(&combo->quick_behavior, event, false);
 }
 
 static void move_pressed_keys_to_active_combo(struct active_combo *active_combo) {
