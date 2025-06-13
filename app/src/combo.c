@@ -296,19 +296,6 @@ static inline int press_combo_behavior(int combo_idx, const struct combo_cfg *co
     return zmk_behavior_invoke_binding(&combo->behavior, event, true);
 }
 
-static inline int release_combo_behavior(int combo_idx, const struct combo_cfg *combo,
-                                         int32_t timestamp) {
-    struct zmk_behavior_binding_event event = {
-        .position = ZMK_VIRTUAL_KEY_POSITION_COMBO(combo_idx),
-        .timestamp = timestamp,
-#if IS_ENABLED(CONFIG_ZMK_SPLIT)
-        .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
-#endif
-    };
-
-    return zmk_behavior_invoke_binding(&combo->behavior, event, false);
-}
-
 static inline int quick_release_combo_behavior(int combo_idx, const struct combo_cfg *combo,
                                                int32_t timestamp) {
     struct zmk_behavior_binding_event event = {
@@ -320,6 +307,19 @@ static inline int quick_release_combo_behavior(int combo_idx, const struct combo
     };
 
     return zmk_behavior_invoke_binding(&combo->quick_behavior, event, false);
+}
+
+static inline int release_combo_behavior(int combo_idx, const struct combo_cfg *combo,
+                                         int32_t timestamp) {
+    struct zmk_behavior_binding_event event = {
+        .position = ZMK_VIRTUAL_KEY_POSITION_COMBO(combo_idx),
+        .timestamp = timestamp,
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+        .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
+#endif
+    };
+
+    return zmk_behavior_invoke_binding(&combo->behavior, event, false);
 }
 
 static void move_pressed_keys_to_active_combo(struct active_combo *active_combo) {
