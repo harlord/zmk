@@ -296,19 +296,6 @@ static inline int press_combo_behavior(int combo_idx, const struct combo_cfg *co
     return zmk_behavior_invoke_binding(&combo->behavior, event, true);
 }
 
-static inline int quick_release_combo_behavior(int combo_idx, const struct combo_cfg *combo,
-                                               int32_t timestamp) {
-    struct zmk_behavior_binding_event event = {
-        .position = ZMK_VIRTUAL_KEY_POSITION_COMBO(combo_idx),
-        .timestamp = timestamp,
-#if IS_ENABLED(CONFIG_ZMK_SPLIT)
-        .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
-#endif
-    };
-
-    return zmk_behavior_invoke_binding(&combo->quick_behavior, event, false);
-}
-
 static inline int release_combo_behavior(int combo_idx, const struct combo_cfg *combo,
                                          int32_t timestamp) {
     struct zmk_behavior_binding_event event = {
@@ -320,6 +307,19 @@ static inline int release_combo_behavior(int combo_idx, const struct combo_cfg *
     };
 
     return zmk_behavior_invoke_binding(&combo->behavior, event, false);
+}
+
+static inline int quick_release_combo_behavior(int combo_idx, const struct combo_cfg *combo,
+                                               int32_t timestamp) {
+    struct zmk_behavior_binding_event event = {
+        .position = ZMK_VIRTUAL_KEY_POSITION_COMBO(combo_idx),
+        .timestamp = timestamp,
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+        .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
+#endif
+    };
+
+    return zmk_behavior_invoke_binding(&combo->quick_behavior, event, false);
 }
 
 static void move_pressed_keys_to_active_combo(struct active_combo *active_combo) {
@@ -397,6 +397,7 @@ static bool release_combo_key(int32_t position, int64_t timestamp) {
         if (key_released) {
             active_combo->key_positions_pressed_count--;
             const struct combo_cfg *c = &combos[active_combo->combo_idx];
+            quick_release_combo_behavior(active_combo->combo_idx, c, timestamp);
             if ((c->slow_release && all_keys_released) || (!c->slow_release && all_keys_pressed)) {
                 release_combo_behavior(active_combo->combo_idx, c, timestamp);
             }
