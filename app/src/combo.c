@@ -48,12 +48,14 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 struct combo_cfg {
     int32_t key_positions[MAX_COMBO_KEYS];
     int16_t key_position_len;
+    /* Optional leader key array (0 elements if none). */
+    int32_t key_positions_leader[MAX_COMBO_KEYS];
+    int16_t key_position_len_leader;
     int16_t require_prior_idle_ms;
     int32_t timeout_ms;
     uint32_t layer_mask;
     struct zmk_behavior_binding behavior;
-    struct zmk_behavior_binding quick_behavior;
-
+    struct zmk_behavior_binding behavior_quick_release;
     // if slow release is set, the combo releases when the last key is released.
     // otherwise, the combo releases when the first key is released.
     bool slow_release;
@@ -66,6 +68,7 @@ struct active_combo {
     // Once this array is empty, the behavior is released.
     uint16_t key_positions_pressed_count;
     struct zmk_position_state_changed_event key_positions_pressed[MAX_COMBO_KEYS];
+    bool quick_release_pressed;
 };
 
 #define PROP_BIT_AT_IDX(n, prop, idx) BIT(DT_PROP_BY_IDX(n, prop, idx))
@@ -77,19 +80,23 @@ struct active_combo {
 #define GET_KEY_POSITION_MASK_PORTION(idx, n) ((NODE_PROP_BITMASK(n, key_positions) >> idx) & 0xFF)
 
 #define COMBO_INST(n, positions)                                                                   \
-    COND_CODE_1(IS_EQ(DT_PROP_LEN(n, key_positions), positions),                                   \
-                (                                                                                  \
-                    {                                                                              \
-                        .timeout_ms = DT_PROP(n, timeout_ms),                                      \
-                        .require_prior_idle_ms = DT_PROP(n, require_prior_idle_ms),                \
-                        .key_positions = DT_PROP(n, key_positions),                                \
-                        .key_position_len = DT_PROP_LEN(n, key_positions),                         \
-                        .behavior = ZMK_KEYMAP_EXTRACT_BINDING(0, n),                              \
-                        .quick_behavior = ZMK_KEYMAP_EXTRACT_BINDING(1, n),                        \
-                        .slow_release = DT_PROP(n, slow_release),                                  \
-                        .layer_mask = NODE_PROP_BITMASK(n, layers),                                \
-                    }, ),                                                                          \
-                ())
+    COND_CODE_1(                                                                                   \
+        IS_EQ(DT_PROP_LEN(n, key_positions), positions),                                           \
+        (                                                                                          \
+            {                                                                                      \
+                .timeout_ms = DT_PROP(n, timeout_ms),                                              \
+                .require_prior_idle_ms = DT_PROP(n, require_prior_idle_ms),                        \
+                .key_positions = DT_PROP(n, key_positions),                                        \
+                .key_position_len = DT_PROP_LEN(n, key_positions),                                 \
+                .key_positions_leader = DT_PROP_OR(n, key_positions_leader, {}),                   \
+                .key_position_len_leader = DT_PROP_LEN_OR(n, key_positions_leader, 0),             \
+                .behavior = ZMK_KEYMAP_EXTRACT_BINDING(0, n),                                      \
+                .behavior_quick_release = COND_CODE_1(DT_PROP_HAS_IDX(n, bindings, 1),             \
+                                                      (ZMK_KEYMAP_EXTRACT_BINDING(1, n)), ({0})),  \
+                .slow_release = DT_PROP(n, slow_release),                                          \
+                .layer_mask = NODE_PROP_BITMASK(n, layers),                                        \
+            }, ),                                                                                  \
+        ())
 
 #define COMBO_CONFIGS_WITH_MATCHING_POSITIONS_LEN(positions, _ignore)                              \
     DT_INST_FOREACH_CHILD_VARGS(0, COMBO_INST, positions)
@@ -168,18 +175,58 @@ static int setup_candidates_for_first_keypress(int32_t position, int64_t timesta
 
     for (size_t i = 0; i < ARRAY_SIZE(combos); i++) {
         if (sys_bitfield_test_bit((mem_addr_t)&combo_lookup[position], i)) {
+
             const struct combo_cfg *combo = &combos[i];
-            if (combo_active_on_layer(combo, highest_active_layer) &&
+
+            /*
+             * Leader-key constraint:
+             * 1. key_positions_leader may be empty (len == 0). In that case the combo works
+             *    exactly as before.
+             * 2. If a leader key is defined (len == 1), the combo may only be considered if
+             *    the very first key that is pressed (the current <position>) equals:
+             *       a) the leader key, and
+             *       b) the first position in the combo's key_positions list.
+             */
+            bool leader_ok = true;
+            if (combo->key_position_len_leader == 1) {
+                leader_ok = (position == combo->key_positions_leader[0]) &&
+                            (position == combo->key_positions[0]);
+            }
+
+            if (leader_ok && combo_active_on_layer(combo, highest_active_layer) &&
                 !is_quick_tap(combo, timestamp)) {
+
                 sys_bitfield_set_bit((mem_addr_t)&candidates, i);
                 number_of_combo_candidates++;
+                LOG_INF("leader_ok … %d %d", position, i);
+
+            } else {
+                LOG_INF("leader_not_ok … %d %d", position, i);
             }
-            // LOG_DBG("combo timeout %d %d %d", position, i, candidates[i].timeout_at);
         }
     }
 
     return number_of_combo_candidates;
 }
+
+// static int setup_candidates_for_first_keypress(int32_t position, int64_t timestamp) {
+//     int number_of_combo_candidates = 0;
+//     uint8_t highest_active_layer = zmk_keymap_highest_layer_active();
+
+//     for (size_t i = 0; i < ARRAY_SIZE(combos); i++) {
+//         if (sys_bitfield_test_bit((mem_addr_t)&combo_lookup[position], i)) {
+//             const struct combo_cfg *combo = &combos[i];
+//             if (combo_active_on_layer(combo, highest_active_layer) &&
+//                 !is_quick_tap(combo, timestamp)) {
+//                 sys_bitfield_set_bit((mem_addr_t)&candidates, i);
+//                 number_of_combo_candidates++;
+//             }
+//             // LOG_DBG("combo timeout %d %d %d", position, i, candidates[i].timeout_at);
+//         }
+//     }
+
+//     return number_of_combo_candidates;
+// }
 
 static inline uint8_t zero_one_or_more_bits(uint32_t field) {
     if (field == 0) {
@@ -292,7 +339,7 @@ static inline int press_combo_behavior(int combo_idx, const struct combo_cfg *co
     };
 
     last_combo_timestamp = timestamp;
-    zmk_behavior_invoke_binding(&combo->quick_behavior, event, true);
+
     return zmk_behavior_invoke_binding(&combo->behavior, event, true);
 }
 
@@ -307,19 +354,6 @@ static inline int release_combo_behavior(int combo_idx, const struct combo_cfg *
     };
 
     return zmk_behavior_invoke_binding(&combo->behavior, event, false);
-}
-
-static inline int quick_release_combo_behavior(int combo_idx, const struct combo_cfg *combo,
-                                               int32_t timestamp) {
-    struct zmk_behavior_binding_event event = {
-        .position = ZMK_VIRTUAL_KEY_POSITION_COMBO(combo_idx),
-        .timestamp = timestamp,
-#if IS_ENABLED(CONFIG_ZMK_SPLIT)
-        .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
-#endif
-    };
-
-    return zmk_behavior_invoke_binding(&combo->quick_behavior, event, false);
 }
 
 static void move_pressed_keys_to_active_combo(struct active_combo *active_combo) {
@@ -342,6 +376,7 @@ static struct active_combo *store_active_combo(int32_t combo_idx) {
     for (int i = 0; i < CONFIG_ZMK_COMBO_MAX_PRESSED_COMBOS; i++) {
         if (active_combos[i].combo_idx == UINT16_MAX) {
             active_combos[i].combo_idx = combo_idx;
+            active_combos[i].quick_release_pressed = false;
             active_combo_count++;
             return &active_combos[i];
         }
@@ -362,6 +397,21 @@ static void activate_combo(int combo_idx) {
     move_pressed_keys_to_active_combo(active_combo);
     press_combo_behavior(combo_idx, &combos[combo_idx],
                          active_combo->key_positions_pressed[0].data.timestamp);
+
+    /* Quick-release binding (if present) */
+    bool has_quick = combos[combo_idx].behavior_quick_release.behavior_dev != NULL;
+
+    if (has_quick) {
+        struct zmk_behavior_binding_event qrev_ev = {
+            .position = ZMK_VIRTUAL_KEY_POSITION_COMBO(active_combo->combo_idx),
+            .timestamp = active_combo->key_positions_pressed[0].data.timestamp,
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+            .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
+#endif
+        };
+        zmk_behavior_invoke_binding(&combos[combo_idx].behavior_quick_release, qrev_ev, true);
+        active_combo->quick_release_pressed = true;
+    }
 }
 
 static void deactivate_combo(int active_combo_index) {
@@ -397,10 +447,25 @@ static bool release_combo_key(int32_t position, int64_t timestamp) {
         if (key_released) {
             active_combo->key_positions_pressed_count--;
             const struct combo_cfg *c = &combos[active_combo->combo_idx];
-            quick_release_combo_behavior(active_combo->combo_idx, c, timestamp);
+
+            /* quick-release behavior always released on first key up */
+            if (active_combo->quick_release_pressed &&
+                c->behavior_quick_release.behavior_dev != NULL) {
+                struct zmk_behavior_binding_event qrev_ev = {
+                    .position = ZMK_VIRTUAL_KEY_POSITION_COMBO(active_combo->combo_idx),
+                    .timestamp = timestamp,
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+                    .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
+#endif
+                };
+                zmk_behavior_invoke_binding(&c->behavior_quick_release, qrev_ev, false);
+                active_combo->quick_release_pressed = false;
+            }
+
             if ((c->slow_release && all_keys_released) || (!c->slow_release && all_keys_pressed)) {
                 release_combo_behavior(active_combo->combo_idx, c, timestamp);
             }
+
             if (all_keys_released) {
                 deactivate_combo(combo_idx);
             }
