@@ -15,12 +15,18 @@ child-binding:
     key-positions:
       type: array
       required: true
+    key-positions-leader:
+      type: array
+      required: false
     timeout-ms:
       type: int
       default: 50
     require-prior-idle-ms:
       type: int
       default: -1
+    key-positions-first-exclude:
+      type: array
+      required: false
     slow-release:
       type: boolean
     layers:
