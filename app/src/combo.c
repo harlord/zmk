@@ -22,6 +22,7 @@
  #include <zmk/matrix.h>
  #include <zmk/keymap.h>
  #include <zmk/virtual_key_position.h>
+ #include <zmk/events/pointer_move.h>
  
  LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  
@@ -62,6 +63,10 @@
      // if slow release is set, the combo releases when the last key is released.
      // otherwise, the combo releases when the first key is released.
      bool slow_release;
+     // require pointer movement after first keypress before activation
+     bool require_pointer_move;
+     // window for pointer move after first keypress; 0 => use timeout_ms
+     int32_t pointer_move_timeout_ms;
  };
  
  struct active_combo {
@@ -100,6 +105,8 @@
                                                        (ZMK_KEYMAP_EXTRACT_BINDING(1, n)), ({0})),  \
                  .slow_release = DT_PROP(n, slow_release),                                          \
                  .layer_mask = NODE_PROP_BITMASK(n, layers),                                        \
+                 .require_pointer_move = DT_PROP_OR(n, require_pointer_move, false),                \
+                 .pointer_move_timeout_ms = DT_PROP_OR(n, pointer_move_timeout_ms, 0),              \
              }, ),                                                                                  \
          ())
  
@@ -138,11 +145,18 @@
  
  struct k_work_delayable timeout_task;
  int64_t timeout_task_timeout_at;
+ static struct k_work movement_activation_work;
  
  // this keeps track of the last non-combo, non-mod key tap
  int64_t last_tapped_timestamp = INT32_MIN;
  // this keeps track of the last time a combo was pressed
  int64_t last_combo_timestamp = INT32_MIN;
+ // pointer movement tracking relative to first keypress
+ int64_t first_keypress_timestamp = LLONG_MIN;
+ int64_t last_pointer_move_timestamp = LLONG_MIN;
+ static bool combo_pointer_move_needed = false;
+
+ bool zmk_combo_pointer_move_needed(void) { return combo_pointer_move_needed; }
  
  static void store_last_tapped(int64_t timestamp) {
      if (timestamp > last_combo_timestamp) {
@@ -287,7 +301,19 @@
      // since events may have been reraised after clearing one or more slots at
      // the start of pressed_keys (see: release_pressed_keys), we have to check
      // that each key needed to trigger the combo was pressed, not just the last.
-     return candidate->key_position_len == pressed_keys_count;
+     if (candidate->key_position_len != pressed_keys_count) {
+         return false;
+     }
+     if (candidate->require_pointer_move) {
+         int32_t window = candidate->pointer_move_timeout_ms > 0 ? candidate->pointer_move_timeout_ms : candidate->timeout_ms;
+         if (last_pointer_move_timestamp < first_keypress_timestamp) {
+             return false;
+         }
+         if (last_pointer_move_timestamp > first_keypress_timestamp + window) {
+             return false;
+         }
+     }
+     return true;
  }
  
  static int cleanup();
@@ -497,7 +523,16 @@
          activate_combo(fully_pressed_combo);
          fully_pressed_combo = INT16_MAX;
      }
+     first_keypress_timestamp = LLONG_MIN;
+     combo_pointer_move_needed = false;
      return release_pressed_keys();
+ }
+ 
+ static void movement_activation_work_cb(struct k_work *item) {
+     ARG_UNUSED(item);
+     if (fully_pressed_combo != INT16_MAX) {
+         cleanup();
+     }
  }
  
  static void update_timeout_task() {
@@ -518,9 +553,19 @@
  static int position_state_down(const zmk_event_t *ev, struct zmk_position_state_changed *data) {
      int num_candidates;
      if (!pressed_keys_count) {
+         first_keypress_timestamp = data->timestamp;
          num_candidates = setup_candidates_for_first_keypress(data->position, data->timestamp);
          if (num_candidates == 0) {
              return ZMK_EV_EVENT_BUBBLE;
+         }
+         // Determine if any current candidates require pointer movement; if so, signal listener
+         for (int i = 0; i < ARRAY_SIZE(combos); i++) {
+             if (sys_bitfield_test_bit((mem_addr_t)&candidates, i)) {
+                 if (combos[i].require_pointer_move) {
+                     combo_pointer_move_needed = true;
+                     break;
+                 }
+             }
          }
      } else {
          filter_timed_out_candidates(data->timestamp);
@@ -536,6 +581,16 @@
              if (sys_bitfield_test_bit((mem_addr_t)&candidates, i)) {
                  const struct combo_cfg *candidate_combo = &combos[i];
                  if (candidate_is_completely_pressed(candidate_combo)) {
+                     if (candidate_combo->require_pointer_move) {
+                         int32_t window = candidate_combo->pointer_move_timeout_ms > 0
+                                              ? candidate_combo->pointer_move_timeout_ms
+                                              : candidate_combo->timeout_ms;
+                         if (!(last_pointer_move_timestamp >= first_keypress_timestamp &&
+                               last_pointer_move_timestamp <= first_keypress_timestamp + window)) {
+                             // movement not yet satisfied; keep waiting
+                             return ret;
+                         }
+                     }
                      fully_pressed_combo = i;
                      if (num_candidates == 1) {
                          cleanup();
@@ -603,12 +658,36 @@
      }
      return ZMK_EV_EVENT_BUBBLE;
  }
+ static int pointer_move_listener(const zmk_event_t *eh) {
+     struct zmk_pointer_move *pm = as_zmk_pointer_move(eh);
+     if (pm) {
+         last_pointer_move_timestamp = pm->timestamp;
+         if (pressed_keys_count > 0 && fully_pressed_combo == INT16_MAX) {
+             // If any candidate waiting on pointer movement is now satisfied, activate immediately
+             for (int i = 0; i < ARRAY_SIZE(combos); i++) {
+                 if (sys_bitfield_test_bit((mem_addr_t)&candidates, i)) {
+                     const struct combo_cfg *candidate_combo = &combos[i];
+                     if (candidate_combo->require_pointer_move &&
+                         candidate_combo->key_position_len == pressed_keys_count &&
+                         candidate_is_completely_pressed(candidate_combo)) {
+                         fully_pressed_combo = i;
+                         k_work_submit(&movement_activation_work);
+                         break;
+                     }
+                 }
+             }
+         }
+     }
+     return ZMK_EV_EVENT_BUBBLE;
+ }
  
  int behavior_combo_listener(const zmk_event_t *eh) {
      if (as_zmk_position_state_changed(eh) != NULL) {
          return position_state_changed_listener(eh);
      } else if (as_zmk_keycode_state_changed(eh) != NULL) {
          return keycode_state_changed_listener(eh);
+     } else if (as_zmk_pointer_move(eh) != NULL) {
+         return pointer_move_listener(eh);
      }
      return ZMK_EV_EVENT_BUBBLE;
  }
@@ -616,6 +695,7 @@
  ZMK_LISTENER(combo, behavior_combo_listener);
  ZMK_SUBSCRIPTION(combo, zmk_position_state_changed);
  ZMK_SUBSCRIPTION(combo, zmk_keycode_state_changed);
+ ZMK_SUBSCRIPTION(combo, zmk_pointer_move);
  
  static int combo_init(void) {
      for (size_t i = 0; i < CONFIG_ZMK_COMBO_MAX_PRESSED_COMBOS; i++) {
@@ -623,6 +703,7 @@
      }
  
      k_work_init_delayable(&timeout_task, combo_timeout_handler);
+     k_work_init(&movement_activation_work, movement_activation_work_cb);
      LOG_WRN("Have %d combos!", ARRAY_SIZE(combos));
      for (int i = 0; i < ARRAY_SIZE(combos); i++) {
          initialize_combo(i);
