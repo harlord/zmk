@@ -31,3 +31,14 @@ child-binding:
       type: boolean
     layers:
       type: array
+
+    # If true, this combo requires a pointer (trackball/mouse) movement to occur
+    # after the first key of the combo is pressed before it can activate.
+    require-pointer-move:
+      type: boolean
+
+    # Optional window in milliseconds within which the pointer movement must occur
+    # after the first key press. If omitted or 0, the combo's timeout governs.
+    pointer-move-timeout-ms:
+      type: int
+      required: false
