@@ -15,13 +15,30 @@ child-binding:
     key-positions:
       type: array
       required: true
+    key-positions-leader:
+      type: array
+      required: false
     timeout-ms:
       type: int
       default: 50
     require-prior-idle-ms:
       type: int
       default: -1
+    key-positions-first-exclude:
+      type: array
+      required: false
     slow-release:
       type: boolean
     layers:
       type: array
+
+    # If true, this combo requires a pointer (trackball/mouse) movement to occur
+    # after the first key of the combo is pressed before it can activate.
+    require-pointer-move:
+      type: boolean
+
+    # Optional window in milliseconds within which the pointer movement must occur
+    # after the first key press. If omitted or 0, the combo's timeout governs.
+    pointer-move-timeout-ms:
+      type: int
+      required: false

@@ -51,13 +51,11 @@ if ZMK_STUDIO_RPC
 
 menu "Transports"
 
-DT_CHOSEN_ZMK_STUDIO_RPC_UART := zmk,studio-rpc-uart
-
 config ZMK_STUDIO_TRANSPORT_UART
     bool "Serial"
     select SERIAL
     select RING_BUFFER
-    default y if $(dt_chosen_enabled,$(DT_CHOSEN_ZMK_STUDIO_RPC_UART))
+    default y if ZMK_USB || ARCH_POSIX
 
 config ZMK_STUDIO_TRANSPORT_UART_RX_STACK_SIZE
     int "RX Stack Size"

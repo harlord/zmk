@@ -1,0 +1,11 @@
+/*
+ * Copyright (c) 2025 The ZMK Contributors
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <zmk/events/pointer_move.h>
+
+ZMK_EVENT_IMPL(zmk_pointer_move);
+
+

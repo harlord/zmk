@@ -5,18 +5,12 @@
  */
 
 #include <dt-bindings/zmk/matrix_transform.h>
-#include "a_dux-layouts.dtsi"
-
-&physical_layout0 {
-    transform = <&default_transform>;
-};
-
 
 / {
 
     chosen {
         zmk,kscan = &kscan0;
-        zmk,physical-layout = &physical_layout0;
+        zmk,matrix-transform = &default_transform;
     };
 
     default_transform: keymap_transform_0 {
@@ -55,4 +49,5 @@
             <&pro_micro  9 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
         ;
     };
+
 };

@@ -26,6 +26,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #include <zmk/hid.h>
 #include <zmk/keymap.h>
+#include <zmk/events/pointer_move.h>
+// Forward declaration from combo.c
+bool zmk_combo_pointer_move_needed(void);
 
 #define ONE_IF_DEV_OK(n)                                                                           \
     COND_CODE_1(DT_NODE_HAS_STATUS(DT_INST_PHANDLE(n, device), okay), (1 +), (0 +))
@@ -293,12 +296,40 @@ static void input_handler(const struct input_listener_config *config,
 
     if (evt->sync) {
         if (data->mouse.wheel_data.mode == INPUT_LISTENER_XY_DATA_MODE_REL) {
-            zmk_hid_mouse_scroll_set(data->mouse.wheel_data.x.value,
-                                     data->mouse.wheel_data.y.value);
+            /* Only allow scrolling on a single axis at a time. Determine which axis has the
+             * greater absolute movement value and zero the other one so that the host only
+             * receives scroll input on a single axis per report. */
+
+            int16_t h_val = data->mouse.wheel_data.x.value;
+            int16_t v_val = data->mouse.wheel_data.y.value;
+
+            if ((h_val > 0 ? h_val : -h_val) > (v_val > 0 ? v_val : -v_val)) {
+                /* Horizontal movement dominates, drop vertical component. */
+                v_val = 0;
+            } else {
+                /* Vertical movement dominates (or both equal), drop horizontal component. */
+                h_val = 0;
+            }
+
+            zmk_hid_mouse_scroll_set(h_val, v_val);
         }
 
         if (data->mouse.data.mode == INPUT_LISTENER_XY_DATA_MODE_REL) {
-            zmk_hid_mouse_movement_set(data->mouse.data.x.value, data->mouse.data.y.value);
+            int16_t dx = data->mouse.data.x.value;
+            int16_t dy = data->mouse.data.y.value;
+            if (dx != 0 || dy != 0) {
+                // Always send HID movement
+                zmk_hid_mouse_movement_set(dx, dy);
+                // Only raise pointer_move event when some combo is waiting on movement
+                if (zmk_combo_pointer_move_needed()) {
+                    struct zmk_pointer_move pm = {
+                        .dx = dx,
+                        .dy = dy,
+                        .timestamp = k_uptime_get(),
+                    };
+                    raise_zmk_pointer_move(pm);
+                }
+            }
         }
 
         if (data->mouse.button_set != 0) {
