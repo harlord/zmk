@@ -18,6 +18,7 @@
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/behavior.h>
+#include <zmk/hid.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -789,7 +790,8 @@ static int keycode_state_changed_listener(const zmk_event_t *eh) {
     // we want to catch layer-up events too... how?
     struct zmk_keycode_state_changed *ev = as_zmk_keycode_state_changed(eh);
 
-    if (ev->state && !is_mod(ev->usage_page, ev->keycode)) {
+    /* Ignore mouse button usage page (0x09) so clicks don't reset idle timer */
+    if (ev->state && ev->usage_page != HID_USAGE_BUTTON && !is_mod(ev->usage_page, ev->keycode)) {
         store_last_tapped(ev->timestamp);
     }
 
