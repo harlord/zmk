@@ -295,6 +295,22 @@
      return pressed_keys[0].data.timestamp + first_timeout;
  }
  
+ /* Forward declaration */
+ static inline bool combo_requires_pointer_move(const struct combo_cfg *c);
+
+ /* Helper implementation */
+ static inline bool combo_requires_pointer_move(const struct combo_cfg *c) {
+     if (!c->require_pointer_move) {
+         return false;
+     }
+     zmk_keymap_layer_index_t top_idx = zmk_keymap_highest_layer_active();
+     zmk_keymap_layer_id_t top_id = zmk_keymap_layer_index_to_id(top_idx);
+     if (!(c->layer_mask & BIT(top_id))) {
+         return false;
+     }
+     return true;
+ }
+ 
  static inline bool candidate_is_completely_pressed(const struct combo_cfg *candidate) {
      // this code assumes set(pressed_keys) <= set(candidate->key_positions)
      // this invariant is enforced by filter_candidates
@@ -304,12 +320,26 @@
      if (candidate->key_position_len != pressed_keys_count) {
          return false;
      }
-     if (candidate->require_pointer_move) {
+     if (combo_requires_pointer_move(candidate)) {
+         /* Determine the timestamp of the first key that belongs to *this* combo */
+         int64_t combo_first_ts = LLONG_MAX;
+         for (int i = 0; i < pressed_keys_count; i++) {
+             int32_t pos = pressed_keys[i].data.position;
+             /* check if pos is part of candidate */
+             for (int k = 0; k < candidate->key_position_len; k++) {
+                 if (candidate->key_positions[k] == pos) {
+                     combo_first_ts = MIN(combo_first_ts, pressed_keys[i].data.timestamp);
+                     break;
+                 }
+             }
+         }
+
          int32_t window = candidate->pointer_move_timeout_ms > 0 ? candidate->pointer_move_timeout_ms : candidate->timeout_ms;
-         if (last_pointer_move_timestamp < first_keypress_timestamp) {
+
+         if (last_pointer_move_timestamp < combo_first_ts) {
              return false;
          }
-         if (last_pointer_move_timestamp > first_keypress_timestamp + window) {
+         if (last_pointer_move_timestamp > combo_first_ts + window) {
              return false;
          }
      }
@@ -581,7 +611,7 @@
              if (sys_bitfield_test_bit((mem_addr_t)&candidates, i)) {
                  const struct combo_cfg *candidate_combo = &combos[i];
                  if (candidate_is_completely_pressed(candidate_combo)) {
-                     if (candidate_combo->require_pointer_move) {
+                     if (combo_requires_pointer_move(candidate_combo)) {
                          int32_t window = candidate_combo->pointer_move_timeout_ms > 0
                                               ? candidate_combo->pointer_move_timeout_ms
                                               : candidate_combo->timeout_ms;
@@ -667,7 +697,7 @@
              for (int i = 0; i < ARRAY_SIZE(combos); i++) {
                  if (sys_bitfield_test_bit((mem_addr_t)&candidates, i)) {
                      const struct combo_cfg *candidate_combo = &combos[i];
-                     if (candidate_combo->require_pointer_move &&
+                     if (combo_requires_pointer_move(candidate_combo) &&
                          candidate_combo->key_position_len == pressed_keys_count &&
                          candidate_is_completely_pressed(candidate_combo)) {
                          fully_pressed_combo = i;
