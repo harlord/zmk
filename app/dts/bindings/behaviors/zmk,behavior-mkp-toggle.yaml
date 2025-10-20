@@ -1,0 +1,26 @@
+# zmk,behavior-mkp-toggle.yaml
+description: >
+  Toggle version of &mkp that alternates between press/release
+  for any mouse button (LCLK, RCLK, MCLK, etc.)
+  Supports toggle-mode = "on" | "off" to set initial state.
+
+compatible: "zmk,behavior-mkp-toggle"
+
+include: one_param.yaml
+
+properties:
+  label:
+    type: string
+    description: Human readable label for the behavior
+    deprecated: true  
+
+  toggle-mode:
+    type: string
+    enum:
+      - "off"
+      - "on"
+    default: "off"
+    description: >
+      Initial state of the toggle (default off).
+      "off" = all buttons released on startup,
+      "on" = all buttons pressed on startup.
