@@ -95,10 +95,10 @@ static const struct behavior_driver_api behavior_mkp_toggle_driver_api = {
 
 #define TOGGLE_CFG(inst)                                                                       \
     static const struct mkp_toggle_config mkp_toggle_cfg_##inst = {                            \
-        .toggle_mode = DT_ENUM_IDX_OR(inst, toggle_mode, TOGGLE_START_OFF),                    \
+        .toggle_mode = DT_ENUM_IDX_OR(DT_DRV_INST(inst), toggle_mode, TOGGLE_START_OFF),       \
     };                                                                                         \
     BEHAVIOR_DT_INST_DEFINE(inst, mkp_toggle_init, NULL, NULL, &mkp_toggle_cfg_##inst,         \
-                            APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                  \
+                            POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                  \
                             &behavior_mkp_toggle_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(TOGGLE_CFG);
@@ -118,7 +118,7 @@ static const struct behavior_driver_api behavior_mkp_toggle_driver_api = {
 
 #define STUB_CFG(inst)                                                                            \
     BEHAVIOR_DT_INST_DEFINE(inst, NULL, NULL, NULL, NULL,                                         \
-                            APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                    \
+                            POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                    \
                             &behavior_mkp_toggle_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(STUB_CFG);
