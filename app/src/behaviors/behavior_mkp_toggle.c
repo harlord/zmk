@@ -76,15 +76,10 @@ ZMK_LISTENER(mkp_toggle, on_endpoint_changed);
 ZMK_SUBSCRIPTION(mkp_toggle, zmk_endpoint_changed);
 
 static int mkp_toggle_init(const struct device *dev) {
-    const struct mkp_toggle_config *cfg = dev->config;
-    if (cfg->toggle_mode == TOGGLE_START_ON) {
-        for (int i = 0; i < MAX_MOUSE_BUTTONS; i++) {
-            if (!button_state[i]) {
-                zmk_hid_mouse_button_press(i);
-                button_state[i] = true;
-            }
-        }
-    }
+    // BUGFIX: Don't press buttons at init time!
+    // The toggle_mode only affects the internal state tracking, not actual button presses.
+    // Button presses should only happen when the behavior is explicitly invoked.
+    ARG_UNUSED(dev);
     return 0;
 }
 

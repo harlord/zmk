@@ -276,6 +276,13 @@ static void apply_resolution_scaling(struct input_listener_data *data, struct in
 
 static void input_handler(const struct input_listener_config *config,
                           struct input_listener_data *data, struct input_event *evt) {
+    // BUGFIX: Clear button state on non-button events to prevent stuck buttons over BLE
+    // Only keep button state if we're actually processing a button event
+    if (evt->type != INPUT_EV_KEY) {
+        data->mouse.button_set = 0;
+        data->mouse.button_clear = 0;
+    }
+
     // First, process to update the event data as needed.
     int ret = filter_with_input_config(config, data, evt);
 
@@ -326,6 +333,10 @@ static void input_handler(const struct input_listener_config *config,
             int16_t dx = data->mouse.data.x.value;
             int16_t dy = data->mouse.data.y.value;
             if (dx != 0 || dy != 0) {
+                // BUGFIX: Only send button state if we actually received button events
+                // For pure movement reports, don't include any button state from the input_listener
+                // The actual button state is managed by the HID layer via explicit button behaviors
+                
                 // Always send HID movement
                 zmk_hid_mouse_movement_set(dx, dy);
                 // Only raise pointer_move event when some combo is waiting on movement
