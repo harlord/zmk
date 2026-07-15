@@ -35,6 +35,7 @@ enum flavor {
     FLAVOR_BALANCED,
     FLAVOR_TAP_PREFERRED,
     FLAVOR_TAP_UNLESS_INTERRUPTED,
+    FLAVOR_HOLD_PREFERRED_BALANCED,
 };
 
 enum status {
@@ -90,6 +91,11 @@ struct active_hold_tap {
 
     // initialized to -1, which is to be interpreted as "no other key has been pressed yet"
     int32_t position_of_first_other_key_pressed;
+
+    // for FLAVOR_HOLD_PREFERRED_BALANCED: set true when any key in
+    // hold-trigger-key-positions is pressed while this hold-tap is undecided.
+    // Recorded on key press so the hold decision is independent of release order.
+    bool saw_trigger_key;
 };
 
 // The undecided hold tap is the hold tap that needs to be decided before
@@ -270,6 +276,7 @@ static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event 
         active_hold_taps[i].param_tap = param_tap;
         active_hold_taps[i].timestamp = event->timestamp;
         active_hold_taps[i].position_of_first_other_key_pressed = -1;
+        active_hold_taps[i].saw_trigger_key = false;
         return &active_hold_taps[i];
     }
     return NULL;
@@ -355,6 +362,39 @@ static void decide_hold_preferred(struct active_hold_tap *hold_tap, enum decisio
     }
 }
 
+// Positional flavor: the hold/tap decision is based purely on whether a key in
+// hold-trigger-key-positions was pressed while undecided (tracked in saw_trigger_key,
+// recorded on press). It is therefore independent of which key is released first,
+// so cross-hand mod+key rolls produce the held mod regardless of release order.
+// A non-trigger key does not force a tap immediately; the decision is deferred so a
+// following trigger key can still promote to hold (enables chaining e.g. Shift+Ctrl+<key>).
+static void decide_hold_preferred_balanced(struct active_hold_tap *hold_tap,
+                                            enum decision_moment event) {
+    switch (event) {
+    case HT_OTHER_KEY_DOWN:
+        // Commit to hold as soon as a trigger key is seen; otherwise stay undecided.
+        if (hold_tap->saw_trigger_key) {
+            hold_tap->status = STATUS_HOLD_INTERRUPT;
+        }
+        return;
+    case HT_OTHER_KEY_UP:
+    case HT_KEY_UP:
+        // Release order is irrelevant: hold iff a trigger key was pressed, else tap.
+        hold_tap->status = hold_tap->saw_trigger_key ? STATUS_HOLD_INTERRUPT : STATUS_TAP;
+        return;
+    case HT_TIMER_EVENT:
+        // Held past the tapping term with no trigger key (e.g. a pure same-hand
+        // two-mod chord): resolve to hold.
+        hold_tap->status = STATUS_HOLD_TIMER;
+        return;
+    case HT_QUICK_TAP:
+        hold_tap->status = STATUS_TAP;
+        return;
+    default:
+        return;
+    }
+}
+
 static inline const char *flavor_str(enum flavor flavor) {
     switch (flavor) {
     case FLAVOR_HOLD_PREFERRED:
@@ -365,6 +405,8 @@ static inline const char *flavor_str(enum flavor flavor) {
         return "tap-preferred";
     case FLAVOR_TAP_UNLESS_INTERRUPTED:
         return "tap-unless-interrupted";
+    case FLAVOR_HOLD_PREFERRED_BALANCED:
+        return "hold-preferred-balanced";
     default:
         return "UNKNOWN FLAVOR";
     }
@@ -557,13 +599,20 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
     case FLAVOR_TAP_UNLESS_INTERRUPTED:
         decide_tap_unless_interrupted(hold_tap, decision_moment);
         break;
+    case FLAVOR_HOLD_PREFERRED_BALANCED:
+        decide_hold_preferred_balanced(hold_tap, decision_moment);
+        break;
     }
 
     if (hold_tap->status == STATUS_UNDECIDED) {
         return;
     }
 
-    decide_positional_hold(hold_tap);
+    // The positional flavor handles hold-trigger-key-positions inline via saw_trigger_key
+    // (recorded on press), so the standard first-other-key positional check is skipped.
+    if (hold_tap->config->flavor != FLAVOR_HOLD_PREFERRED_BALANCED) {
+        decide_positional_hold(hold_tap);
+    }
 
     // Since the hold-tap has been decided, clean up undecided_hold_tap and
     // execute the decided behavior.
@@ -782,6 +831,19 @@ static int position_state_changed_listener(const zmk_event_t *eh) {
         .data = {.position = copy_raised_zmk_position_state_changed(ev)},
     };
     capture_event(&capture);
+
+    // For FLAVOR_HOLD_PREFERRED_BALANCED: note (on press) whether the other key is one
+    // of the hold-trigger-key-positions, so the hold decision does not depend on which
+    // key is released first.
+    if (ev->state) {
+        for (int i = 0; i < undecided_hold_tap->config->hold_trigger_key_positions_len; i++) {
+            if (undecided_hold_tap->config->hold_trigger_key_positions[i] == ev->position) {
+                undecided_hold_tap->saw_trigger_key = true;
+                break;
+            }
+        }
+    }
+
     decide_hold_tap(undecided_hold_tap, ev->state ? HT_OTHER_KEY_DOWN : HT_OTHER_KEY_UP);
     return ZMK_EV_EVENT_CAPTURED;
 }

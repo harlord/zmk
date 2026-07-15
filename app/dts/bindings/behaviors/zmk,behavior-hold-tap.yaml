@@ -37,6 +37,7 @@ properties:
       - "balanced"
       - "tap-preferred"
       - "tap-unless-interrupted"
+      - "hold-preferred-balanced"
   hold-while-undecided:
     type: boolean
   hold-while-undecided-linger:
