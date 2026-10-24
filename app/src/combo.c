@@ -67,6 +67,8 @@
      bool require_pointer_move;
      // window for pointer move after first keypress; 0 => use timeout_ms
      int32_t pointer_move_timeout_ms;
+     // match the combo even if other keys were pressed (and are still held) before it
+     bool ignore_prior_parallels;
  };
  
  struct active_combo {
@@ -107,7 +109,8 @@
                  .layer_mask = NODE_PROP_BITMASK(n, layers),                                        \
                  .require_pointer_move = DT_PROP_OR(n, require_pointer_move, false),                \
                  .pointer_move_timeout_ms = DT_PROP_OR(n, pointer_move_timeout_ms, 0),              \
-             }, ),                                                                                  \
+                 .ignore_prior_parallels = DT_PROP(n, ignore_prior_parallels),                      \
+             }, ),                                                                             \
          ())
  
  #define COMBO_CONFIGS_WITH_MATCHING_POSITIONS_LEN(positions, _ignore)                              \
@@ -580,6 +583,97 @@
      }
  }
  
+ static bool combo_has_position(const struct combo_cfg *combo, int32_t position) {
+     for (int k = 0; k < combo->key_position_len; k++) {
+         if (combo->key_positions[k] == position) {
+             return true;
+         }
+     }
+     return false;
+ }
+
+ /*
+  * Look for an ignore-prior-parallels combo that is completely pressed by the last
+  * keys in pressed_keys, i.e. all its keys were pressed after the other (prior) keys
+  * that are still held. Returns the longest match, or -1 if there is none.
+  */
+ static int find_ignore_prior_parallels_combo(int32_t position, int64_t timestamp) {
+     uint8_t highest_active_layer = zmk_keymap_highest_layer_active();
+     int best = -1;
+
+     for (int i = 0; i < ARRAY_SIZE(combos); i++) {
+         const struct combo_cfg *combo = &combos[i];
+         if (!combo->ignore_prior_parallels ||
+             !sys_bitfield_test_bit((mem_addr_t)&combo_lookup[position], i) ||
+             combo->key_position_len >= pressed_keys_count ||
+             (best >= 0 && combo->key_position_len <= combos[best].key_position_len)) {
+             continue;
+         }
+
+         int first = pressed_keys_count - combo->key_position_len;
+         bool tail_matches = true;
+         for (int k = first; k < pressed_keys_count; k++) {
+             if (!combo_has_position(combo, pressed_keys[k].data.position)) {
+                 tail_matches = false;
+                 break;
+             }
+         }
+         if (!tail_matches) {
+             continue;
+         }
+
+         // apply the same rules as for a regular first keypress, using the
+         // first key of this combo instead of the first key pressed overall
+         int32_t first_position = pressed_keys[first].data.position;
+         int64_t first_timestamp = pressed_keys[first].data.timestamp;
+
+         if (combo->key_position_len_leader == 1 &&
+             (first_position != combo->key_positions_leader[0] ||
+              first_position != combo->key_positions[0])) {
+             continue;
+         }
+         bool first_key_allowed = true;
+         for (int idx = 0; idx < combo->key_position_len_first_exclude; idx++) {
+             if (first_position == combo->key_positions_first_exclude[idx]) {
+                 first_key_allowed = false;
+                 break;
+             }
+         }
+         if (!first_key_allowed || !combo_active_on_layer(combo, highest_active_layer) ||
+             is_quick_tap(combo, first_timestamp) || combo_requires_pointer_move(combo) ||
+             first_timestamp + combo->timeout_ms <= timestamp) {
+             continue;
+         }
+
+         best = i;
+     }
+
+     return best;
+ }
+
+ static void activate_combo_ignoring_prior_keys(int combo_idx) {
+     int first = pressed_keys_count - combos[combo_idx].key_position_len;
+     struct zmk_position_state_changed_event prior_keys[MAX_COMBO_KEYS];
+
+     memcpy(prior_keys, pressed_keys, first * sizeof(pressed_keys[0]));
+     for (int i = first; i < pressed_keys_count; i++) {
+         pressed_keys[i - first] = pressed_keys[i];
+     }
+     pressed_keys_count -= first;
+
+     memset(candidates, 0, BYTES_FOR_COMBOS_MASK * sizeof(uint32_t));
+     fully_pressed_combo = INT16_MAX;
+
+     // let the prior keys through first so they are typed before the combo
+     for (int i = 0; i < first; i++) {
+         LOG_DBG("combo: releasing prior position event %d", prior_keys[i].data.position);
+         ZMK_EVENT_RELEASE(prior_keys[i]);
+     }
+
+     fully_pressed_combo = combo_idx;
+     cleanup();
+ }
+
  static int position_state_down(const zmk_event_t *ev, struct zmk_position_state_changed *data) {
      int num_candidates;
      if (!pressed_keys_count) {
@@ -605,7 +699,17 @@
      LOG_DBG("combo: capturing position event %d", data->position);
      int ret = capture_pressed_key(data);
      update_timeout_task();
- 
+
+     // the regular candidates gave up because of keys pressed before; check
+     // whether an ignore-prior-parallels combo is completed by the latest keys.
+     if (num_candidates == 0 && ret == ZMK_EV_EVENT_CAPTURED) {
+         int idx = find_ignore_prior_parallels_combo(data->position, data->timestamp);
+         if (idx >= 0) {
+             activate_combo_ignoring_prior_keys(idx);
+             return ret;
+         }
+     }
+
      if (num_candidates) {
          for (int i = 0; i < ARRAY_SIZE(combos); i++) {
              if (sys_bitfield_test_bit((mem_addr_t)&candidates, i)) {

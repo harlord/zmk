@@ -42,3 +42,9 @@ child-binding:
     pointer-move-timeout-ms:
       type: int
       required: false
+
+    # If true, the combo still activates when its keys are pressed while other
+    # (prior) keys are still held. E.g. combo <32 33> fires for 31 + 32 + 33 when
+    # 31 was pressed before 32; 31 is then sent as a normal key press first.
+    ignore-prior-parallels:
+      type: boolean
