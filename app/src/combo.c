@@ -133,9 +133,23 @@
  // We need at least 4 bytes to avoid alignment issues
  #define BYTES_FOR_COMBOS_MASK DIV_ROUND_UP(COMBO_CHILDREN_COUNT, 32)
  
+ // Room for the combo keys plus a few extra keys held in parallel (ignore-prior-parallels).
+ #define MAX_PRESSED_KEYS (MAX_COMBO_KEYS + 4)
+ 
+ // Set to 0 to silence the ignore-prior-parallels debug logs.
+ #define IPP_DEBUG 1
+ #if IPP_DEBUG
+ #define IPP_LOG(...) LOG_INF("IPP " __VA_ARGS__)
+ #else
+ #define IPP_LOG(...)
+ #endif
+ 
  uint8_t pressed_keys_count = 0;
  // set of keys pressed
- struct zmk_position_state_changed_event pressed_keys[MAX_COMBO_KEYS] = {};
+ struct zmk_position_state_changed_event pressed_keys[MAX_PRESSED_KEYS] = {};
+ // scratch space for keys that are let through before an ignore-prior-parallels combo
+ // (static on purpose: keeps it off the small workqueue stack)
+ static struct zmk_position_state_changed_event ipp_other_keys[MAX_PRESSED_KEYS];
  // the set of candidate combos based on the currently pressed_keys
  uint32_t candidates[BYTES_FOR_COMBOS_MASK];
  // the last candidate that was completely pressed
@@ -160,31 +174,7 @@
  int64_t last_pointer_move_timestamp = LLONG_MIN;
  static bool combo_pointer_move_needed = false;
  
- // physical state of every key position, updated for every position event
- static uint32_t held_positions[DIV_ROUND_UP(ZMK_KEYMAP_LEN, 32)];
- 
  bool zmk_combo_pointer_move_needed(void) { return combo_pointer_move_needed; }
- 
- static void track_held_position(int32_t position, bool pressed) {
-     if (position < 0 || position >= ZMK_KEYMAP_LEN) {
-         return;
-     }
-     if (pressed) {
-         sys_bitfield_set_bit((mem_addr_t)&held_positions, position);
-     } else {
-         sys_bitfield_clear_bit((mem_addr_t)&held_positions, position);
-     }
- }
- 
- // true if any key other than `position` is physically held right now
- static bool other_keys_held(int32_t position) {
-     for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
-         if (i != position && sys_bitfield_test_bit((mem_addr_t)&held_positions, i)) {
-             return true;
-         }
-     }
-     return false;
- }
  
  static void store_last_tapped(int64_t timestamp) {
      if (timestamp > last_combo_timestamp) {
@@ -253,21 +243,21 @@
              /*
               * Quick-tap protection (require-prior-idle-ms) exists to avoid triggering combos
               * in the middle of fast typing. A combo with ignore-prior-parallels opts out of it
-              * when another key is still physically held: that earlier key overlaps with the
-              * combo keys, which is exactly the case the property is meant to tolerate.
+              * completely, no matter what the previous key was (part of a combo or not,
+              * still held or already released).
               */
-             bool quick_tap_blocks = is_quick_tap(combo, timestamp) &&
-                                     !(combo->ignore_prior_parallels && other_keys_held(position));
+             bool quick_tap_blocks = !combo->ignore_prior_parallels && is_quick_tap(combo, timestamp);
  
              if (leader_ok && first_key_allowed &&
                  combo_active_on_layer(combo, highest_active_layer) && !quick_tap_blocks) {
  
                  sys_bitfield_set_bit((mem_addr_t)&candidates, i);
                  number_of_combo_candidates++;
-                 LOG_DBG("combo candidate: position %d combo %d", position, (int)i);
+                 IPP_LOG("candidate pos=%d combo=%d", position, (int)i);
  
              } else {
-                 LOG_DBG("combo not a candidate: position %d combo %d", position, (int)i);
+                 IPP_LOG("NOT candidate pos=%d combo=%d leader=%d first_ok=%d quick_tap_blocks=%d",
+                         position, (int)i, leader_ok, first_key_allowed, quick_tap_blocks);
              }
          }
      }
@@ -386,7 +376,7 @@
  }
  
  static int capture_pressed_key(const struct zmk_position_state_changed *ev) {
-     if (pressed_keys_count == MAX_COMBO_KEYS) {
+     if (pressed_keys_count == MAX_PRESSED_KEYS) {
          return ZMK_EV_EVENT_BUBBLE;
      }
  
@@ -605,9 +595,9 @@
  }
  
  /*
-  * Look for an ignore-prior-parallels combo that is completely pressed by the last
-  * keys in pressed_keys, i.e. all its keys were pressed after the other (prior) keys
-  * that are still held. Returns the longest match, or -1 if there is none.
+  * Look for an ignore-prior-parallels combo whose keys are all present in pressed_keys,
+  * while other (prior or interleaved) keys are still held. Returns the longest match,
+  * or -1 if there is none.
   *
   * Note: require-prior-idle-ms is intentionally not checked here. The prior keys are
   * captured and still held, which is exactly the situation this property tolerates.
@@ -625,22 +615,27 @@
              continue;
          }
  
-         int first = pressed_keys_count - combo->key_position_len;
-         bool tail_matches = true;
-         for (int k = first; k < pressed_keys_count; k++) {
-             if (!combo_has_position(combo, pressed_keys[k].data.position)) {
-                 tail_matches = false;
-                 break;
+         // all keys of the combo must be among the pressed keys, in any position of the
+         // list. Other pressed keys (prior or interleaved) are simply ignored.
+         // pressed_keys is in press order, so the first match is the combo's first key.
+         int found = 0;
+         int32_t first_position = -1;
+         int64_t first_timestamp = 0;
+         for (int k = 0; k < pressed_keys_count; k++) {
+             if (combo_has_position(combo, pressed_keys[k].data.position)) {
+                 if (found == 0) {
+                     first_position = pressed_keys[k].data.position;
+                     first_timestamp = pressed_keys[k].data.timestamp;
+                 }
+                 found++;
              }
          }
-         if (!tail_matches) {
+         if (found != combo->key_position_len) {
              continue;
          }
  
          // apply the same rules as for a regular first keypress, using the
          // first key of this combo instead of the first key pressed overall
-         int32_t first_position = pressed_keys[first].data.position;
-         int64_t first_timestamp = pressed_keys[first].data.timestamp;
  
          if (combo->key_position_len_leader == 1 &&
              (first_position != combo->key_positions_leader[0] ||
@@ -667,22 +662,29 @@
  }
  
  static void activate_combo_ignoring_prior_keys(int combo_idx) {
-     int first = pressed_keys_count - combos[combo_idx].key_position_len;
-     struct zmk_position_state_changed_event prior_keys[MAX_COMBO_KEYS];
+     const struct combo_cfg *combo = &combos[combo_idx];
+     int others = 0;
+     int combo_count = 0;
  
-     memcpy(prior_keys, pressed_keys, first * sizeof(pressed_keys[0]));
-     for (int i = first; i < pressed_keys_count; i++) {
-         pressed_keys[i - first] = pressed_keys[i];
+     // stable partition: combo keys are compacted to the front of pressed_keys,
+     // every other key goes to the scratch buffer, both keep their press order
+     for (int i = 0; i < pressed_keys_count; i++) {
+         if (combo_has_position(combo, pressed_keys[i].data.position)) {
+             pressed_keys[combo_count++] = pressed_keys[i];
+         } else {
+             ipp_other_keys[others++] = pressed_keys[i];
+         }
      }
-     pressed_keys_count -= first;
+     pressed_keys_count = combo_count;
  
      memset(candidates, 0, BYTES_FOR_COMBOS_MASK * sizeof(uint32_t));
      fully_pressed_combo = INT16_MAX;
  
-     // let the prior keys through first so they are typed before the combo
-     for (int i = 0; i < first; i++) {
-         LOG_DBG("combo: releasing prior position event %d", prior_keys[i].data.position);
-         ZMK_EVENT_RELEASE(prior_keys[i]);
+     IPP_LOG("activating combo %d, letting %d other keys through first", combo_idx, others);
+ 
+     // let the other keys through first so they are typed before the combo
+     for (int i = 0; i < others; i++) {
+         ZMK_EVENT_RELEASE(ipp_other_keys[i]);
      }
  
      fully_pressed_combo = combo_idx;
@@ -691,6 +693,7 @@
  
  static int position_state_down(const zmk_event_t *ev, struct zmk_position_state_changed *data) {
      int num_candidates;
+     IPP_LOG("down pos=%d held_in_combo_code=%d", data->position, pressed_keys_count);
      if (!pressed_keys_count) {
          first_keypress_timestamp = data->timestamp;
          num_candidates = setup_candidates_for_first_keypress(data->position, data->timestamp);
@@ -713,15 +716,29 @@
  
      LOG_DBG("combo: capturing position event %d", data->position);
      int ret = capture_pressed_key(data);
+     IPP_LOG("pos=%d candidates=%d captured=%d count=%d", data->position, num_candidates,
+             ret == ZMK_EV_EVENT_CAPTURED, pressed_keys_count);
      update_timeout_task();
  
-     // the regular candidates gave up because of keys pressed before; check
-     // whether an ignore-prior-parallels combo is completed by the latest keys.
-     if (num_candidates == 0 && ret == ZMK_EV_EVENT_CAPTURED) {
-         int idx = find_ignore_prior_parallels_combo(data->position, data->timestamp);
-         if (idx >= 0) {
-             activate_combo_ignoring_prior_keys(idx);
-             return ret;
+     // Check whether an ignore-prior-parallels combo is completed by this key, even if other
+     // pressed keys (which may still be candidates of unrelated combos) are around.
+     // A regular combo that is exactly matched by all pressed keys always wins.
+     if (ret == ZMK_EV_EVENT_CAPTURED && pressed_keys_count > 1) {
+         bool regular_complete = false;
+         for (int i = 0; i < ARRAY_SIZE(combos); i++) {
+             if (sys_bitfield_test_bit((mem_addr_t)&candidates, i) &&
+                 candidate_is_completely_pressed(&combos[i])) {
+                 regular_complete = true;
+                 break;
+             }
+         }
+         if (!regular_complete) {
+             int idx = find_ignore_prior_parallels_combo(data->position, data->timestamp);
+             IPP_LOG("ignore combo search -> %d", idx);
+             if (idx >= 0) {
+                 activate_combo_ignoring_prior_keys(idx);
+                 return ret;
+             }
          }
      }
  
@@ -758,7 +775,34 @@
  }
  
  static int position_state_up(const zmk_event_t *ev, struct zmk_position_state_changed *data) {
-     int released_keys = cleanup();
+     /*
+      * Normally any key-up means "no combo is coming" and flushes the captured keys.
+      * When the key going up is NOT one of the captured keys (e.g. an earlier key of a
+      * roll like m -> a) and an ignore-prior-parallels combo is still waiting for its
+      * next key, keep waiting: the candidate timeout will flush the keys if nothing comes.
+      */
+     bool keep_waiting = false;
+     if (pressed_keys_count > 0 && fully_pressed_combo == INT16_MAX) {
+         bool is_captured = false;
+         for (int i = 0; i < pressed_keys_count; i++) {
+             if (pressed_keys[i].data.position == data->position) {
+                 is_captured = true;
+                 break;
+             }
+         }
+         if (!is_captured) {
+             for (int i = 0; i < ARRAY_SIZE(combos); i++) {
+                 if (sys_bitfield_test_bit((mem_addr_t)&candidates, i) &&
+                     combos[i].ignore_prior_parallels) {
+                     keep_waiting = true;
+                     break;
+                 }
+             }
+         }
+     }
+     IPP_LOG("up pos=%d keep_waiting=%d", data->position, keep_waiting);
+ 
+     int released_keys = keep_waiting ? 0 : cleanup();
      if (release_combo_key(data->position, data->timestamp)) {
          return ZMK_EV_EVENT_HANDLED;
      }
@@ -792,9 +836,6 @@
      if (data == NULL) {
          return ZMK_EV_EVENT_BUBBLE;
      }
- 
-     // keep the physical key state up to date before anything else looks at it
-     track_held_position(data->position, data->state);
  
      if (data->state) { // keydown
          return position_state_down(ev, data);
