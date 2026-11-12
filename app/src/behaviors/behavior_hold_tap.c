@@ -66,6 +66,11 @@ struct behavior_hold_tap_config {
     bool retro_tap;
     bool hold_trigger_on_release;
     int32_t hold_trigger_key_positions_len;
+    /* Puntero y longitud para la lista de excepciones de prior idle */
+    const int32_t *ignore_prior_idles;
+    size_t ignore_prior_idles_len;
+
+    /* Debe ser el ÚNICO arreglo flexible y estar al final de la estructura */
     int32_t hold_trigger_key_positions[];
 };
 
@@ -149,12 +154,34 @@ static void store_last_hold_tapped(struct active_hold_tap *hold_tap) {
 }
 
 static bool is_quick_tap(struct active_hold_tap *hold_tap) {
-    if ((last_tapped.timestamp + hold_tap->config->require_prior_idle_ms) > hold_tap->timestamp) {
+    // 1. Only quick-tap if it is the EXACT SAME key being double-tapped rapidly
+    if ((last_tapped.position == hold_tap->position) &&
+        (last_tapped.timestamp + hold_tap->config->quick_tap_ms) > hold_tap->timestamp) {
         return true;
-    } else {
-        return (last_tapped.position == hold_tap->position) &&
-               (last_tapped.timestamp + hold_tap->config->quick_tap_ms) > hold_tap->timestamp;
     }
+
+    // 2. If require-prior-idle-ms is active, check if the prior key is in our exception list.
+    if (hold_tap->config->require_prior_idle_ms >= 0 && last_tapped.timestamp != INT32_MIN) {
+        bool ignore_idle = false;
+        for (int i = 0; i < hold_tap->config->ignore_prior_idles_len; i++) {
+            if (hold_tap->config->ignore_prior_idles[i] == last_tapped.position) {
+                ignore_idle = true;
+                break;
+            }
+        }
+
+        // If the prior key is NOT in ignore_prior_idles AND the idle time hasn't passed,
+        // we do NOT quick-tap. Returning FALSE here keeps the key UNDECIDED so it can HOLD.
+        if (!ignore_idle) {
+            if ((last_tapped.timestamp + hold_tap->config->require_prior_idle_ms) > hold_tap->timestamp) {
+                return false; // Changed from true to false!
+            }
+        }
+    }
+
+    // 3. Fallback to standard quick-tap-ms check
+    return (last_tapped.position == hold_tap->position) &&
+           (last_tapped.timestamp + hold_tap->config->quick_tap_ms) > hold_tap->timestamp;
 }
 
 static int capture_event(struct captured_event *data) {
@@ -937,6 +964,11 @@ static int behavior_hold_tap_init(const struct device *dev) {
         .hold_trigger_on_release = DT_INST_PROP(n, hold_trigger_on_release),                       \
         .hold_trigger_key_positions = DT_INST_PROP(n, hold_trigger_key_positions),                 \
         .hold_trigger_key_positions_len = DT_INST_PROP_LEN(n, hold_trigger_key_positions),         \
+        /* Añade estas dos líneas para el nuevo parámetro: */                                      \
+        .ignore_prior_idles = COND_CODE_1(DT_INST_HAS_PROP(n, ignore_prior_idles),                 \
+            (behavior_hold_tap_ignore_prior_idles_##n), (NULL)),                                   \
+        .ignore_prior_idles_len = COND_CODE_1(DT_INST_HAS_PROP(n, ignore_prior_idles),             \
+            (DT_INST_PROP_LEN(n, ignore_prior_idles)), (0)),                                       \
     };                                                                                             \
     static struct behavior_hold_tap_data behavior_hold_tap_data_##n = {};                          \
     BEHAVIOR_DT_INST_DEFINE(n, behavior_hold_tap_init, NULL, &behavior_hold_tap_data_##n,          \

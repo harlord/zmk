@@ -50,3 +50,6 @@ properties:
     default: []
   hold-trigger-on-release:
     type: boolean
+  ignore-prior-idles:
+    type: array
+    description: "List of keycodes or bindings that bypass require-prior-idle-ms checks."
