@@ -69,7 +69,10 @@ struct behavior_hold_tap_config {
     /* Puntero y longitud para la lista de excepciones de prior idle */
     const int32_t *ignore_prior_idles;
     size_t ignore_prior_idles_len;
-
+    /* Positions that, when pressed while this (balanced) hold-tap is undecided,
+     * turn it into hold-preferred. */
+    const int32_t *convert_balanced_to_hold;
+    size_t convert_balanced_to_hold_len;
     /* Debe ser el ÚNICO arreglo flexible y estar al final de la estructura */
     int32_t hold_trigger_key_positions[];
 };
@@ -101,6 +104,10 @@ struct active_hold_tap {
     // hold-trigger-key-positions is pressed while this hold-tap is undecided.
     // Recorded on key press so the hold decision is independent of release order.
     bool saw_trigger_key;
+
+    // for FLAVOR_BALANCED: set true when a key in convert-balanced-to-hold was pressed
+    // while this hold-tap is undecided. From then on it is decided as hold-preferred.
+    bool balanced_converted;
 };
 
 // The undecided hold tap is the hold tap that needs to be decided before
@@ -304,6 +311,7 @@ static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event 
         active_hold_taps[i].timestamp = event->timestamp;
         active_hold_taps[i].position_of_first_other_key_pressed = -1;
         active_hold_taps[i].saw_trigger_key = false;
+        active_hold_taps[i].balanced_converted = false;
         return &active_hold_taps[i];
     }
     return NULL;
@@ -612,8 +620,14 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
         return;
     }
 
+    // A balanced hold-tap that was converted behaves as hold-preferred.
+    enum flavor flavor = hold_tap->config->flavor;
+    if (flavor == FLAVOR_BALANCED && hold_tap->balanced_converted) {
+        flavor = FLAVOR_HOLD_PREFERRED;
+    }
+
     // If the hold-tap behavior is still undecided, attempt to decide it.
-    switch (hold_tap->config->flavor) {
+    switch (flavor) {
     case FLAVOR_HOLD_PREFERRED:
         decide_hold_preferred(hold_tap, decision_moment);
         break;
@@ -801,6 +815,16 @@ static const struct behavior_driver_api behavior_hold_tap_driver_api = {
 #endif // IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
 };
 
+static bool is_balanced_convert_key(const struct behavior_hold_tap_config *config,
+                                    int32_t position) {
+    for (size_t i = 0; i < config->convert_balanced_to_hold_len; i++) {
+        if (config->convert_balanced_to_hold[i] == position) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static int position_state_changed_listener(const zmk_event_t *eh) {
     struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
 
@@ -871,7 +895,20 @@ static int position_state_changed_listener(const zmk_event_t *eh) {
         }
     }
 
-    decide_hold_tap(undecided_hold_tap, ev->state ? HT_OTHER_KEY_DOWN : HT_OTHER_KEY_UP);
+    // Remember which hold-tap was undecided: decide_hold_tap() may clear undecided_hold_tap.
+    struct active_hold_tap *candidate = undecided_hold_tap;
+
+    // The converting key itself is decided as balanced (it does not trigger the hold);
+    // the conversion only affects the keys pressed after it.
+    decide_hold_tap(candidate, ev->state ? HT_OTHER_KEY_DOWN : HT_OTHER_KEY_UP);
+
+    if (ev->state && candidate->status == STATUS_UNDECIDED &&
+        candidate->config->flavor == FLAVOR_BALANCED &&
+        is_balanced_convert_key(candidate->config, ev->position)) {
+        LOG_DBG("%d converted from balanced to hold-preferred by key %d", candidate->position,
+                ev->position);
+        candidate->balanced_converted = true;
+    }
     return ZMK_EV_EVENT_CAPTURED;
 }
 
@@ -948,7 +985,20 @@ static int behavior_hold_tap_init(const struct device *dev) {
     return 0;
 }
 
+/* Per-instance arrays for the optional list properties. */
+#define HT_DEFINE_LISTS(n)                                                                         \
+    COND_CODE_1(DT_INST_HAS_PROP(n, ignore_prior_idles),                                           \
+                (static const int32_t behavior_hold_tap_ignore_prior_idles_##n[] =                 \
+                     DT_INST_PROP(n, ignore_prior_idles);),                                        \
+                ())                                                                                \
+    COND_CODE_1(DT_INST_HAS_PROP(n, convert_balanced_to_hold),                                     \
+                (static const int32_t behavior_hold_tap_convert_balanced_to_hold_##n[] =           \
+                     DT_INST_PROP(n, convert_balanced_to_hold);),                                  \
+                ())
+
+
 #define KP_INST(n)                                                                                 \
+    HT_DEFINE_LISTS(n)                                                                             \
     static const struct behavior_hold_tap_config behavior_hold_tap_config_##n = {                  \
         .tapping_term_ms = DT_INST_PROP(n, tapping_term_ms),                                       \
         .hold_behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(n, bindings, 0)),               \
@@ -969,6 +1019,10 @@ static int behavior_hold_tap_init(const struct device *dev) {
             (behavior_hold_tap_ignore_prior_idles_##n), (NULL)),                                   \
         .ignore_prior_idles_len = COND_CODE_1(DT_INST_HAS_PROP(n, ignore_prior_idles),             \
             (DT_INST_PROP_LEN(n, ignore_prior_idles)), (0)),                                       \
+        .convert_balanced_to_hold = COND_CODE_1(DT_INST_HAS_PROP(n, convert_balanced_to_hold),     \
+            (behavior_hold_tap_convert_balanced_to_hold_##n), (NULL)),                             \
+        .convert_balanced_to_hold_len = COND_CODE_1(DT_INST_HAS_PROP(n, convert_balanced_to_hold), \
+            (DT_INST_PROP_LEN(n, convert_balanced_to_hold)), (0)),                                 \
     };                                                                                             \
     static struct behavior_hold_tap_data behavior_hold_tap_data_##n = {};                          \
     BEHAVIOR_DT_INST_DEFINE(n, behavior_hold_tap_init, NULL, &behavior_hold_tap_data_##n,          \

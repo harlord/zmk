@@ -53,3 +53,7 @@ properties:
   ignore-prior-idles:
     type: array
     description: "List of keycodes or bindings that bypass require-prior-idle-ms checks."
+  convert-balanced-to-hold:
+    type: array
+    required: false
+    description: "List of keycodes or bindings that, when pressed while this (balanced) hold-tap is undecided, turn it into hold-preferred."
