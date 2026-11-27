@@ -13,3 +13,7 @@ properties:
     required: true
   mods:
     type: int
+  expire-idle-ms:
+    type: int
+    default: 0
+    description: The number of milliseconds to wait before the caps word is deactivated if no keys are pressed.

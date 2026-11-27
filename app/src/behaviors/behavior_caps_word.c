@@ -7,6 +7,7 @@
 #define DT_DRV_COMPAT zmk_behavior_caps_word
 
 #include <zephyr/device.h>
+#include <zephyr/kernel.h>
 #include <drivers/behavior.h>
 #include <zephyr/logging/log.h>
 #include <zmk/behavior.h>
@@ -32,24 +33,59 @@ struct caps_word_continue_item {
 
 struct behavior_caps_word_config {
     zmk_mod_flags_t mods;
+    /* If > 0, caps word is deactivated after this many ms without a key press. 0 = never. */
+    uint32_t expire_idle_ms;
     uint8_t continuations_count;
     struct caps_word_continue_item continuations[];
 };
 
 struct behavior_caps_word_data {
     bool active;
+    const struct device *dev;
+    struct k_work_delayable expire_work;
 };
+
+static void caps_word_restart_expire_timer(const struct device *dev) {
+    const struct behavior_caps_word_config *config = dev->config;
+    struct behavior_caps_word_data *data = dev->data;
+
+    if (config->expire_idle_ms > 0) {
+        k_work_reschedule(&data->expire_work, K_MSEC(config->expire_idle_ms));
+    }
+}
 
 static void activate_caps_word(const struct device *dev) {
     struct behavior_caps_word_data *data = dev->data;
 
     data->active = true;
+    caps_word_restart_expire_timer(dev);
 }
 
 static void deactivate_caps_word(const struct device *dev) {
     struct behavior_caps_word_data *data = dev->data;
 
     data->active = false;
+    k_work_cancel_delayable(&data->expire_work);
+}
+
+static void caps_word_expire_work_handler(struct k_work *work) {
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct behavior_caps_word_data *data =
+        CONTAINER_OF(dwork, struct behavior_caps_word_data, expire_work);
+
+    if (data->active) {
+        LOG_DBG("Deactivating caps_word after idle timeout");
+        deactivate_caps_word(data->dev);
+    }
+}
+
+static int behavior_caps_word_init(const struct device *dev) {
+    struct behavior_caps_word_data *data = dev->data;
+
+    data->dev = dev;
+    k_work_init_delayable(&data->expire_work, caps_word_expire_work_handler);
+
+    return 0;
 }
 
 static int on_caps_word_binding_pressed(struct zmk_behavior_binding *binding,
@@ -151,6 +187,9 @@ static int caps_word_keycode_state_changed_listener(const zmk_event_t *eh) {
                                            ev->implicit_modifiers)) {
             LOG_DBG("Deactivating caps_word for 0x%02X - 0x%02X", ev->usage_page, ev->keycode);
             deactivate_caps_word(dev);
+        } else {
+            // A key was pressed and caps word continues: restart the idle timer.
+            caps_word_restart_expire_timer(dev);
         }
     }
 
@@ -168,10 +207,11 @@ static int caps_word_keycode_state_changed_listener(const zmk_event_t *eh) {
     static struct behavior_caps_word_data behavior_caps_word_data_##n = {.active = false};         \
     static const struct behavior_caps_word_config behavior_caps_word_config_##n = {                \
         .mods = DT_INST_PROP_OR(n, mods, MOD_LSFT),                                                \
+        .expire_idle_ms = DT_INST_PROP_OR(n, expire_idle_ms, 0),                                   \
         .continuations = {LISTIFY(DT_INST_PROP_LEN(n, continue_list), BREAK_ITEM, (, ), n)},       \
         .continuations_count = DT_INST_PROP_LEN(n, continue_list),                                 \
     };                                                                                             \
-    BEHAVIOR_DT_INST_DEFINE(n, NULL, NULL, &behavior_caps_word_data_##n,                           \
+    BEHAVIOR_DT_INST_DEFINE(n, behavior_caps_word_init, NULL, &behavior_caps_word_data_##n,        \
                             &behavior_caps_word_config_##n, POST_KERNEL,                           \
                             CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &behavior_caps_word_driver_api);
 
